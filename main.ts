@@ -7,7 +7,7 @@
 // this file hands over to runner.ts (the last lines below): keep that hand-over and
 // runner.ts as they are, and write the CLI.
 
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, rmdirSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 const FORMATS = ['auto', 'unified', 'search-replace', 'v4a', 'json'];
@@ -884,15 +884,31 @@ function run(args: string[]): { code: number; out: string[] } {
     rows.push({ key: p, line: `${was === null ? 'A' : now === null ? 'D' : 'M'} ${p}` });
   }
   if (!check) {
-    for (const p of [...tree.now.keys()].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)))) {
+    // Deletions go first: a patch may replace a directory by a file at the
+    // same path (delete its files, then create the file), and writing the
+    // file while the directory still stands fails with EISDIR.
+    const changed = [...tree.now.keys()].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
+    for (const p of changed) {
       const was = tree.original(p);
       const now = tree.now.get(p)!;
-      if (was === now) continue;
-      if (now === null) rmSync(p, { force: true });
-      else {
-        mkdirSync(dirname(p), { recursive: true });
-        writeFileSync(p, now);
+      if (was === now || now !== null) continue;
+      rmSync(p, { force: true });
+    }
+    for (const p of changed) {
+      const was = tree.original(p);
+      const now = tree.now.get(p)!;
+      if (was === now || now === null) continue;
+      // A directory may still stand at this path (an earlier edit emptied
+      // it); drop it so the file can take its place. rmdirSync only drops
+      // an empty directory: a non-empty one is left alone, and the write
+      // then fails as it did before.
+      try {
+        if (statSync(p).isDirectory()) rmdirSync(p);
+      } catch {
+        // Absent, or a non-empty directory: nothing to drop.
       }
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, now);
     }
   }
   rows.sort((a, b) => Buffer.compare(Buffer.from(a.key), Buffer.from(b.key)));
